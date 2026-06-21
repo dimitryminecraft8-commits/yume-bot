@@ -63,7 +63,7 @@ async def on_voice_state_update(member, before, after):
         pv_info = data["pv_channels"][guild_id][channel_id]
         whitelist = pv_info.get("whitelist", [])
 
-        if not is_createur(guild_id, user_id) and str(user_id) not in whitelist:
+        if not is_createur(guild_id, user_id) and not is_owner(guild_id, user_id) and str(user_id) not in whitelist:
             now = datetime.now()
             join_tracker[guild_id][user_id] = [
                 t for t in join_tracker[guild_id][user_id]
@@ -90,6 +90,8 @@ async def on_voice_state_update(member, before, after):
     # Protection deco
     if before.channel and not after.channel:
         target_id = str(member.id)
+        original_channel = before.channel
+
         if is_createur(guild_id, target_id) or is_owner(guild_id, target_id):
             await asyncio.sleep(1)
             try:
@@ -97,51 +99,62 @@ async def on_voice_state_update(member, before, after):
                     if entry.target.id == member.id:
                         punisher = entry.user
                         punisher_id = str(punisher.id)
+                        should_punish = False
 
                         if is_createur(guild_id, target_id):
                             if not is_createur(guild_id, punisher_id):
-                                try:
-                                    await punisher.move_to(None)
-                                    await punisher.send("⛔ Tu ne peux pas déconnecter un **Créateur** !")
-                                except:
-                                    pass
+                                should_punish = True
 
                         elif is_owner(guild_id, target_id):
                             if not is_owner(guild_id, punisher_id) and not is_createur(guild_id, punisher_id):
-                                try:
-                                    await punisher.move_to(None)
-                                    await punisher.send("⛔ Tu ne peux pas déconnecter un **Owner** !")
-                                except:
-                                    pass
+                                should_punish = True
+
+                        if should_punish:
+                            # Deco + timeout 10 sec le punisher
+                            try:
+                                await punisher.move_to(None)
+                                await punisher.timeout(timedelta(seconds=10), reason="A tenté de déco un protégé")
+                                await punisher.send("⛔ Tu ne peux pas déconnecter cette personne ! Timeout 10 secondes.")
+                            except:
+                                pass
                         break
             except:
                 pass
 
-    # Protection move
+    # Protection move - remet dans la voc d'origine
     if before.channel and after.channel and before.channel != after.channel:
         target_id = str(member.id)
+        original_channel = before.channel
+
         if is_createur(guild_id, target_id) or is_owner(guild_id, target_id):
             await asyncio.sleep(1)
             try:
                 async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.member_move):
                     punisher = entry.user
                     punisher_id = str(punisher.id)
+                    should_punish = False
 
                     if is_createur(guild_id, target_id):
                         if not is_createur(guild_id, punisher_id):
-                            try:
-                                await punisher.move_to(None)
-                                await punisher.send("⛔ Tu ne peux pas move un **Créateur** !")
-                            except:
-                                pass
+                            should_punish = True
 
                     elif is_owner(guild_id, target_id):
                         if not is_owner(guild_id, punisher_id) and not is_createur(guild_id, punisher_id):
-                            try:
-                                await punisher.move_to(None)
-                                await punisher.send("⛔ Tu ne peux pas move un **Owner** !")
-                            except:
-                                pass
+                            should_punish = True
+
+                    if should_punish:
+                        # Remettre la victime dans sa voc d'origine
+                        try:
+                            await member.move_to(original_channel)
+                        except:
+                            pass
+                        # Deco + timeout 10 sec le punisher
+                        try:
+                            await punisher.move_to(None)
+                            await punisher.timeout(timedelta(seconds=10), reason="A tenté de move un protégé")
+                            await punisher.send("⛔ Tu ne peux pas move cette personne ! Timeout 10 secondes.")
+                        except:
+                            pass
                     break
             except:
                 pass
@@ -214,7 +227,7 @@ async def pv(ctx, channel: discord.VoiceChannel = None):
         if ctx.author.voice:
             channel = ctx.author.voice.channel
         else:
-            await ctx.send("❌ Spécifie une voc ou rejoins-en une ! Ex: `=pv`")
+            await ctx.send("❌ Spécifie une voc ou rejoins-en une !")
             return
 
     if not isinstance(channel, discord.VoiceChannel):
