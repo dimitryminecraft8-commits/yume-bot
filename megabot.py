@@ -32,6 +32,7 @@ data = {
     "laisse_role": {},     # {guild_id: role_id}
     "counters": {},        # {guild_id: {"members": id, "voice": id, "online": id}}
     "snipe": {},           # {channel_id: {content, author, time}}
+    "blacklist": {},       # {guild_id: {user_id: raison}}
 }
 
 def load_data():
@@ -128,6 +129,18 @@ async def on_message_delete(message):
         "author_avatar": str(message.author.display_avatar.url),
         "time": datetime.now().isoformat()
     }
+
+@bot.event
+async def on_member_update(before, after):
+    # Protection blacklist : retire automatiquement les rôles
+    guild_id = str(after.guild.id)
+    if guild_id in data["blacklist"] and str(after.id) in data["blacklist"][guild_id]:
+        roles_to_remove = [r for r in after.roles if r.name != "@everyone"]
+        if roles_to_remove:
+            try:
+                await after.remove_roles(*roles_to_remove, reason="Blacklist - roles retires automatiquement")
+            except:
+                pass
 
 # ==================== LAISSE (suivre en vocal) ====================
 @bot.event
@@ -231,7 +244,10 @@ class HelpView(discord.ui.View):
                 "`&slowmode <secondes>` — Mode lent\n"
                 "`&lock` / `&unlock` — Verrouiller/déverrouiller\n"
                 "`&hide` / `&unhide` — Cacher/montrer un salon\n"
-                "`&nick @user <pseudo>` — Changer un pseudo"
+                "`&nick @user <pseudo>` — Changer un pseudo\n"
+                "`&bl @user <raison>` — Blacklist (retire les rôles, bloque)\n"
+                "`&unbl @user` — Retirer la blacklist\n"
+                "`&bllist` — Voir la liste des blacklist"
             )),
             "absence": discord.Embed(title="🌙 Absence", color=discord.Color.purple(), description=(
                 "`/absence <raison> <date>` — Demander une absence\n"
@@ -568,6 +584,52 @@ async def nick(ctx, member: discord.Member, *, pseudo: str):
         await ctx.send(f"✅ Pseudo de {member.mention} changé en **{pseudo}** !")
     except:
         await ctx.send("❌ Impossible de changer le pseudo.")
+
+@bot.command(name="bl")
+@perm_check("bl")
+async def blacklist_cmd(ctx, member: discord.Member, *, raison: str = "Aucune raison"):
+    guild_id = str(ctx.guild.id)
+    if guild_id not in data["blacklist"]:
+        data["blacklist"][guild_id] = {}
+    if str(member.id) in data["blacklist"][guild_id]:
+        await ctx.send(f"❌ {member.mention} est déjà blacklist !")
+        return
+    roles_to_remove = [r for r in member.roles if r.name != "@everyone"]
+    if roles_to_remove:
+        try:
+            await member.remove_roles(*roles_to_remove, reason=f"Blacklist: {raison}")
+        except:
+            pass
+    data["blacklist"][guild_id][str(member.id)] = raison
+    save_data()
+    await ctx.send(f"🚫 {member.mention} a été **blacklist**. Ses rôles ont été retirés et il ne pourra plus en recevoir.")
+
+@bot.command(name="unbl")
+@perm_check("bl")
+async def unblacklist_cmd(ctx, member: discord.Member):
+    guild_id = str(ctx.guild.id)
+    if guild_id not in data["blacklist"] or str(member.id) not in data["blacklist"][guild_id]:
+        await ctx.send(f"❌ {member.mention} n'est pas blacklist.")
+        return
+    del data["blacklist"][guild_id][str(member.id)]
+    save_data()
+    await ctx.send(f"✅ {member.mention} n'est plus blacklist. Il peut de nouveau recevoir des rôles.")
+
+@bot.command(name="bllist")
+@perm_check("bl")
+async def bllist_cmd(ctx):
+    guild_id = str(ctx.guild.id)
+    if guild_id not in data["blacklist"] or not data["blacklist"][guild_id]:
+        await ctx.send("✅ Aucune personne blacklist.")
+        return
+    embed = discord.Embed(title="🚫 Liste des Blacklist", color=discord.Color.dark_red())
+    desc = ""
+    for uid, raison in data["blacklist"][guild_id].items():
+        member = ctx.guild.get_member(int(uid))
+        name = member.mention if member else f"<@{uid}>"
+        desc += f"{name} — *{raison}*\n"
+    embed.description = desc
+    await ctx.send(embed=embed)
 
 # ==================== VOCAL ====================
 @bot.command(name="laisse")
