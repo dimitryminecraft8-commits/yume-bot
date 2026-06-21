@@ -1,6 +1,5 @@
 import discord
 from discord.ext import commands
-from discord import app_commands
 import json
 import os
 import asyncio
@@ -22,6 +21,8 @@ data = {
 }
 
 join_tracker = defaultdict(lambda: defaultdict(list))
+# Pour éviter les boucles infinies de reconnect/move par le bot
+bot_actions = set()  # set de user_ids que le bot est en train de move
 
 def load_data():
     global data
@@ -57,7 +58,12 @@ async def on_voice_state_update(member, before, after):
     guild_id = str(guild.id)
     user_id = str(member.id)
 
-    # Quelqu'un rejoint une voc =pv
+    # Si c'est le bot qui a causé cette action, on ignore (évite les boucles)
+    action_key = f"{guild_id}:{user_id}"
+    if action_key in bot_actions:
+        return
+
+    # ---- Quelqu'un rejoint une voc =pv ----
     if after.channel and is_pv(guild_id, str(after.channel.id)):
         channel_id = str(after.channel.id)
         pv_info = data["pv_channels"][guild_id][channel_id]
@@ -71,10 +77,13 @@ async def on_voice_state_update(member, before, after):
             ]
             join_tracker[guild_id][user_id].append(now)
 
+            bot_actions.add(action_key)
             try:
                 await member.move_to(None)
             except:
                 pass
+            await asyncio.sleep(0.5)
+            bot_actions.discard(action_key)
 
             if len(join_tracker[guild_id][user_id]) >= 3:
                 join_tracker[guild_id][user_id] = []
@@ -86,12 +95,11 @@ async def on_voice_state_update(member, before, after):
                         pass
                 except:
                     pass
+        return
 
-    # Protection deco
+    # ---- Protection DECO (quelqu'un se fait déconnecter) ----
     if before.channel and not after.channel:
         target_id = str(member.id)
-        original_channel = before.channel
-
         if is_createur(guild_id, target_id) or is_owner(guild_id, target_id):
             await asyncio.sleep(1)
             try:
@@ -99,30 +107,37 @@ async def on_voice_state_update(member, before, after):
                     if entry.target.id == member.id:
                         punisher = entry.user
                         punisher_id = str(punisher.id)
-                        should_punish = False
 
+                        # Le bot lui-même ne se punit pas
+                        if punisher_id == str(bot.user.id):
+                            break
+
+                        should_punish = False
                         if is_createur(guild_id, target_id):
                             if not is_createur(guild_id, punisher_id):
                                 should_punish = True
-
                         elif is_owner(guild_id, target_id):
                             if not is_owner(guild_id, punisher_id) and not is_createur(guild_id, punisher_id):
                                 should_punish = True
 
                         if should_punish:
-                            # Deco + timeout 10 sec le punisher
                             try:
-                                await punisher.move_to(None)
+                                if punisher.voice:
+                                    await punisher.move_to(None)
                                 await punisher.timeout(timedelta(seconds=10), reason="A tenté de déco un protégé")
-                                await punisher.send("⛔ Tu ne peux pas déconnecter cette personne ! Timeout 10 secondes.")
-                            except:
-                                pass
+                                try:
+                                    await punisher.send("⛔ Tu ne peux pas déconnecter cette personne ! Timeout 10 secondes.")
+                                except:
+                                    pass
+                            except Exception as e:
+                                print(f"Erreur punition deco: {e}")
                         break
-            except:
-                pass
+            except Exception as e:
+                print(f"Erreur audit deco: {e}")
+        return
 
-    # Protection move - remet dans la voc d'origine
-    if before.channel and after.channel and before.channel != after.channel:
+    # ---- Protection MOVE (quelqu'un se fait déplacer) ----
+    if before.channel and after.channel and before.channel.id != after.channel.id:
         target_id = str(member.id)
         original_channel = before.channel
 
@@ -132,32 +147,44 @@ async def on_voice_state_update(member, before, after):
                 async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.member_move):
                     punisher = entry.user
                     punisher_id = str(punisher.id)
-                    should_punish = False
 
+                    # Le bot lui-même ne déclenche pas
+                    if punisher_id == str(bot.user.id):
+                        break
+
+                    should_punish = False
                     if is_createur(guild_id, target_id):
                         if not is_createur(guild_id, punisher_id):
                             should_punish = True
-
                     elif is_owner(guild_id, target_id):
                         if not is_owner(guild_id, punisher_id) and not is_createur(guild_id, punisher_id):
                             should_punish = True
 
                     if should_punish:
-                        # Remettre la victime dans sa voc d'origine
+                        # Remettre la victime dans sa voc d'origine (sans déclencher la boucle)
+                        bot_actions.add(action_key)
                         try:
                             await member.move_to(original_channel)
                         except:
                             pass
-                        # Deco + timeout 10 sec le punisher
+                        await asyncio.sleep(0.5)
+                        bot_actions.discard(action_key)
+
+                        # Punir le coupable
                         try:
-                            await punisher.move_to(None)
+                            if punisher.voice:
+                                await punisher.move_to(None)
                             await punisher.timeout(timedelta(seconds=10), reason="A tenté de move un protégé")
-                            await punisher.send("⛔ Tu ne peux pas move cette personne ! Timeout 10 secondes.")
-                        except:
-                            pass
+                            try:
+                                await punisher.send("⛔ Tu ne peux pas move cette personne ! Timeout 10 secondes.")
+                            except:
+                                pass
+                        except Exception as e:
+                            print(f"Erreur punition move: {e}")
                     break
-            except:
-                pass
+            except Exception as e:
+                print(f"Erreur audit move: {e}")
+        return
 
 # ==================== COMMANDES ====================
 @bot.command(name="createur")
@@ -240,22 +267,64 @@ async def pv(ctx, channel: discord.VoiceChannel = None):
         data["pv_channels"][guild_id] = {}
 
     if channel_id in data["pv_channels"][guild_id]:
+        # ---- Enlever le =pv ----
+        pv_info = data["pv_channels"][guild_id][channel_id]
+        locked_by = pv_info.get("locked_by", "owner")
+
+        # Si verrouillé par un créateur, seul un créateur peut déverrouiller
+        if locked_by == "createur" and not is_createur(guild_id, user_id):
+            await ctx.send("❌ Cette voc a été verrouillée par un **Créateur**, seul un Créateur peut la déverrouiller !")
+            return
+
         del data["pv_channels"][guild_id][channel_id]
         save_data()
         try:
-            await channel.set_permissions(ctx.guild.default_role, connect=None)
+            await channel.set_permissions(ctx.guild.default_role, overwrite=None)
         except:
             pass
         embed = discord.Embed(title="🔓 Voc déverrouillée", description=f"**{channel.name}** est maintenant **publique** !", color=discord.Color.green())
         await ctx.send(embed=embed)
     else:
-        data["pv_channels"][guild_id][channel_id] = {"whitelist": []}
+        # ---- Activer le =pv ----
+        locked_by = "createur" if is_createur(guild_id, user_id) else "owner"
+        data["pv_channels"][guild_id][channel_id] = {"whitelist": [], "locked_by": locked_by}
         save_data()
+
         try:
-            await channel.set_permissions(ctx.guild.default_role, connect=False)
-        except:
-            pass
-        embed = discord.Embed(title="🔒 Voc privée activée", description=f"**{channel.name}** est maintenant **privée** !\n\n`=addpv @user` — Autoriser quelqu'un\n`=decoall` — Deco tout le monde", color=discord.Color.red())
+            # Bloquer la connexion ET l'envoi de messages pour @everyone
+            overwrite = discord.PermissionOverwrite()
+            overwrite.connect = False
+            overwrite.send_messages = False
+            await channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
+
+            # Donner à l'auteur le droit de se connecter et parler
+            author_overwrite = discord.PermissionOverwrite()
+            author_overwrite.connect = True
+            author_overwrite.send_messages = True
+            author_overwrite.speak = True
+            await channel.set_permissions(ctx.author, overwrite=author_overwrite)
+        except Exception as e:
+            print(f"Erreur permissions pv: {e}")
+
+        # Donner aux créateurs le droit de parler aussi
+        for cid in data["createurs"].get(guild_id, []):
+            cmember = ctx.guild.get_member(int(cid))
+            if cmember:
+                try:
+                    c_overwrite = discord.PermissionOverwrite()
+                    c_overwrite.connect = True
+                    c_overwrite.send_messages = True
+                    c_overwrite.speak = True
+                    await channel.set_permissions(cmember, overwrite=c_overwrite)
+                except:
+                    pass
+
+        msg = "👑 Seul un **Créateur** peut la déverrouiller." if locked_by == "createur" else "⭐ Un **Owner** ou **Créateur** peut la déverrouiller."
+        embed = discord.Embed(
+            title="🔒 Voc privée activée",
+            description=f"**{channel.name}** est maintenant **privée** !\n\n{msg}\n\n`=addpv @user` — Autoriser quelqu'un\n`=decoall` — Deco tout le monde",
+            color=discord.Color.red()
+        )
         await ctx.send(embed=embed)
 
 @bot.command(name="addpv")
@@ -285,7 +354,9 @@ async def add_whitelist(ctx, member: discord.Member, channel: discord.VoiceChann
         save_data()
 
     try:
-        await channel.set_permissions(member, connect=True)
+        ow = discord.PermissionOverwrite()
+        ow.connect = True
+        await channel.set_permissions(member, overwrite=ow)
     except:
         pass
 
@@ -318,7 +389,7 @@ async def remove_whitelist(ctx, member: discord.Member, channel: discord.VoiceCh
         save_data()
 
     try:
-        await channel.set_permissions(member, connect=False)
+        await channel.set_permissions(member, overwrite=None)
     except:
         pass
 
@@ -346,11 +417,15 @@ async def deco_all(ctx, channel: discord.VoiceChannel = None):
             continue
         if is_owner(guild_id, user_id) and is_createur(guild_id, str(member.id)):
             continue
+        mkey = f"{guild_id}:{member.id}"
+        bot_actions.add(mkey)
         try:
             await member.move_to(None)
             count += 1
         except:
             pass
+        await asyncio.sleep(0.3)
+        bot_actions.discard(mkey)
 
     await ctx.send(f"✅ **{count}** membre(s) déconnecté(s) de **{channel.name}** !")
 
@@ -372,8 +447,9 @@ async def list_pv(ctx):
         channel = ctx.guild.get_channel(int(ch_id))
         if channel:
             whitelist = info.get("whitelist", [])
+            locked_by = info.get("locked_by", "owner")
             wl_mentions = ", ".join([f"<@{uid}>" for uid in whitelist]) if whitelist else "Personne"
-            embed.add_field(name=f"🔒 {channel.name}", value=f"Whitelist: {wl_mentions}", inline=False)
+            embed.add_field(name=f"🔒 {channel.name} ({locked_by})", value=f"Whitelist: {wl_mentions}", inline=False)
 
     await ctx.send(embed=embed)
 
