@@ -3,7 +3,6 @@ from discord.ext import commands
 from discord import app_commands
 import json
 import os
-from typing import Optional
 
 # ==================== CONFIGURATION ====================
 TOKEN = os.getenv("TOKEN")
@@ -22,6 +21,8 @@ bot = commands.Bot(command_prefix="?", intents=intents)
 
 data = {
     "welcome_channel": {},
+    "bye_channel": {},
+    "boost_channel": {},
     "staff_role": {},
 }
 
@@ -73,6 +74,53 @@ async def on_member_join(member):
     embed.timestamp = discord.utils.utcnow()
     await channel.send(embed=embed)
 
+@bot.event
+async def on_member_remove(member):
+    guild_id = str(member.guild.id)
+    if guild_id not in data["bye_channel"]:
+        return
+    channel = member.guild.get_channel(int(data["bye_channel"][guild_id]))
+    if not channel:
+        return
+    embed = discord.Embed(
+        title="🌙 Au revoir...",
+        description=(
+            f"Au revoir **{member.name}** 🌙…\n\n"
+            f"C'est toujours un peu triste de voir quelqu'un partir de **𝐘𝐮𝐦𝐞**\n"
+            f"Merci pour les moments partagés, même les plus simples.\n"
+            f"Chaque membre laisse une trace, et la tienne restera ici\n\n"
+            f"Prends soin de toi… et sache que tu seras toujours le/la bienvenu(e) si tu reviens un jour 💜"
+        ),
+        color=discord.Color.dark_purple()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_footer(text=f"Il reste {member.guild.member_count} membres")
+    embed.timestamp = discord.utils.utcnow()
+    await channel.send(embed=embed)
+
+@bot.event
+async def on_member_update(before, after):
+    guild_id = str(after.guild.id)
+    if guild_id not in data["boost_channel"]:
+        return
+    if after.premium_since and not before.premium_since:
+        channel = after.guild.get_channel(int(data["boost_channel"][guild_id]))
+        if not channel:
+            return
+        embed = discord.Embed(
+            title="💜 Merci pour le boost !",
+            description=(
+                f"Merci pour le boost, {after.mention} !\n\n"
+                f"Ça fait vraiment plaisir, merci pour ton soutien à **𝐘𝐮𝐦𝐞** 💜\n"
+                f"On apprécie énormément !"
+            ),
+            color=discord.Color.purple()
+        )
+        embed.set_thumbnail(url=after.display_avatar.url)
+        embed.set_footer(text=f"Booster #{after.guild.premium_subscription_count}")
+        embed.timestamp = discord.utils.utcnow()
+        await channel.send(embed=embed)
+
 # ==================== COMMANDES ====================
 @bot.tree.command(name="setwelcome", description="📌 Définir le salon de bienvenue")
 @app_commands.describe(channel="Salon où envoyer les messages de bienvenue")
@@ -81,7 +129,27 @@ async def setwelcome(interaction: discord.Interaction, channel: discord.TextChan
     guild_id = str(interaction.guild.id)
     data["welcome_channel"][guild_id] = str(channel.id)
     save_data()
-    embed = discord.Embed(title="✅ Salon de bienvenue configuré", description=f"Les messages seront envoyés dans {channel.mention}", color=COLORS["success"])
+    embed = discord.Embed(title="✅ Salon de bienvenue configuré", description=f"Messages de bienvenue dans {channel.mention}", color=COLORS["success"])
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="setbye", description="🌙 Définir le salon d'au revoir")
+@app_commands.describe(channel="Salon où envoyer les messages d'au revoir")
+@app_commands.checks.has_permissions(administrator=True)
+async def setbye(interaction: discord.Interaction, channel: discord.TextChannel):
+    guild_id = str(interaction.guild.id)
+    data["bye_channel"][guild_id] = str(channel.id)
+    save_data()
+    embed = discord.Embed(title="✅ Salon d'au revoir configuré", description=f"Messages d'au revoir dans {channel.mention}", color=COLORS["success"])
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="setboost", description="💜 Définir le salon pour les boosts")
+@app_commands.describe(channel="Salon où envoyer les messages de boost")
+@app_commands.checks.has_permissions(administrator=True)
+async def setboost(interaction: discord.Interaction, channel: discord.TextChannel):
+    guild_id = str(interaction.guild.id)
+    data["boost_channel"][guild_id] = str(channel.id)
+    save_data()
+    embed = discord.Embed(title="✅ Salon de boost configuré", description=f"Messages de boost dans {channel.mention}", color=COLORS["success"])
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="setstaff", description="👮 Définir le rôle staff pour les DMs")
@@ -148,12 +216,18 @@ async def testwelcome(interaction: discord.Interaction):
     await on_member_join(interaction.user)
     await interaction.response.send_message("✅ Message de bienvenue envoyé !", ephemeral=True)
 
-@bot.tree.command(name="whelp", description="❓ Voir les commandes du bot bienvenue")
+@bot.tree.command(name="testbye", description="🌙 Tester le message d'au revoir")
+@app_commands.checks.has_permissions(administrator=True)
+async def testbye(interaction: discord.Interaction):
+    await on_member_remove(interaction.user)
+    await interaction.response.send_message("✅ Message d'au revoir envoyé !", ephemeral=True)
+
+@bot.tree.command(name="whelp", description="❓ Voir les commandes du bot")
 async def whelp(interaction: discord.Interaction):
     embed = discord.Embed(title="📚 Commandes Welcome Bot", color=COLORS["info"])
-    embed.add_field(name="⚙️ Configuration", value="/setwelcome #salon\n/setstaff @role", inline=False)
+    embed.add_field(name="⚙️ Configuration", value="/setwelcome #salon\n/setbye #salon\n/setboost #salon\n/setstaff @role", inline=False)
     embed.add_field(name="📨 DM", value="/dmall message\n/dmstaff message", inline=False)
-    embed.add_field(name="🧪 Test", value="/testwelcome", inline=False)
+    embed.add_field(name="🧪 Test", value="/testwelcome\n/testbye", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.error
